@@ -143,6 +143,7 @@ class FullModelTorchTuneCheckpointer(_CheckpointerInterface):
         should_load_recipe_state (bool): If True, the checkpointer will load the additional checkpoint files corresponding to
             the recipe state from a previous run. Default is False
 
+
     Raises:
         ValueError: If more than one checkpoint file is provided
     """
@@ -166,7 +167,8 @@ class FullModelTorchTuneCheckpointer(_CheckpointerInterface):
             len(checkpoint_files) == 0 and not enable_dcp
         ):
             raise ValueError(
-                "Currently we only support reading from a single checkpoint file. "
+                "Currently we only support reading from a single checkpoint file, "
+                "or none if DCP is enabled."
                 f"Got {len(checkpoint_files)} files instead."
             )
 
@@ -977,6 +979,7 @@ class FullModelMetaCheckpointer(_CheckpointerInterface):
                 should_load_recipe_state instead.
         should_load_recipe_state (bool): If True, the checkpointer will load the additional checkpoint files corresponding to
                 the recipe state from a previous run. Default is False
+        enable_dcp (bool): If True, use DCP to load/save the checkpoint. Default is False.
 
     Raises:
         ValueError: If ``checkpoint_files`` is not a list of length 1
@@ -1001,7 +1004,8 @@ class FullModelMetaCheckpointer(_CheckpointerInterface):
             len(checkpoint_files) == 0 and not enable_dcp
         ):
             raise ValueError(
-                "Currently we only support reading from a single checkpoint file. "
+                "Currently we only support reading from a single checkpoint file, "
+                "or none if DCP is enabled."
                 f"Got {len(checkpoint_files)} files instead."
             )
 
