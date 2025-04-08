@@ -4,7 +4,6 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-import pickle
 import runpy
 import sys
 from pathlib import Path
@@ -108,7 +107,6 @@ class TestFullDPODistributedRecipe:
         resumed_log_file = gen_log_file_name(resumed_log_dir)
 
         # Resume training
-        print("resume training\n\n\n\n")
         cmd_2 = f"""
         tune run --nnodes 1 --nproc_per_node 2 full_dpo_distributed \
             --config llama3_1/8B_full_dpo \
