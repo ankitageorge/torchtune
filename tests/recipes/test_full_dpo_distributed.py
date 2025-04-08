@@ -146,7 +146,7 @@ class TestFullDPODistributedRecipe:
 
     @pytest.mark.integration_test
     @gpu_test(gpu_count=2)
-    def test_2_training_state_on_resume_with_async_checkpointing(
+    def test_training_state_on_resume_with_async_checkpointing(
         self, tmpdir, monkeypatch
     ):
         """Test whether the recipe state is correctly updated on resume. Since this
@@ -207,12 +207,6 @@ class TestFullDPODistributedRecipe:
 
         resumed_log_dir = (tmpdir / "resumed/").mkdir()
         resumed_log_file = gen_log_file_name(resumed_log_dir)
-        print("resume training  ")
-        with open(tmpdir + "/dist_epoch_0/.metadata", "rb") as f:
-            loaded = pickle.load(f)
-            for index in loaded.storage_data:
-                if index.fqn == "optimizer.param_groups.0.initial_lr":
-                    print("initial_lr was saved in dcp")
 
         # Resume training
         cmd_2 = f"""

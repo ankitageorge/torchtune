@@ -693,20 +693,13 @@ class FullDPORecipeDistributed(FTRecipeInterface):
         num_training_steps: int,
         last_epoch: int,
     ) -> Optimizer:
-        print(
-            "before set up initial_lr",
-            "initial_lr" in self._optimizer.state_dict()["param_groups"][0].keys(),
-        )
         lr_scheduler = config.instantiate(
             cfg_lr_scheduler,
             self._optimizer,
             num_training_steps=num_training_steps,
             last_epoch=last_epoch,
         )
-        print(
-            "after set up initial_lr",
-            "initial_lr" in self._optimizer.state_dict()["param_groups"][0].keys(),
-        )
+
         if self._is_rank_zero:
             log.info("Learning rate scheduler is initialized.")
         return lr_scheduler
@@ -1025,12 +1018,7 @@ class FullDPORecipeDistributed(FTRecipeInterface):
                     self._profiler.step()
 
             self.epochs_run += 1
-            print(
-                "before checkpoint initial_lr",
-                "initial_lr" in self._optimizer.state_dict()["param_groups"][0].keys(),
-            )
             self.save_checkpoint(epoch=curr_epoch)
-            print("next\n\n")
 
         self._profiler.stop()
 

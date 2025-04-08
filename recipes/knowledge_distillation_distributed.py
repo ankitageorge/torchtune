@@ -292,25 +292,24 @@ class KDRecipeDistributed(FTRecipeInterface):
             # Therefore the recipe needs to load the distributed checkpoint to restore the training
             # progress.
             if self._enable_async_checkpointing:
-                # try:
-                checkpoint_dict = self._checkpoint_client.load_distributed_checkpoint(
-                    self._model,
-                    self._optimizer,
-                )
-                print("keys 1 from checkpoint_dict: ", checkpoint_dict.keys())
-                """
+                try:
+                    checkpoint_dict = (
+                        self._checkpoint_client.load_distributed_checkpoint(
+                            self._model,
+                            self._optimizer,
+                        )
+                    )
+
                 except Exception as e:
                     log.warning(
                         f"Failed to load distributed checkpoint: {e}. Training will start from the base checkpoint."
                     )
-                """
-            """
+
             if training.ADAPTER_KEY not in checkpoint_dict:
                 raise ValueError(
                     "Adapter weights not found. Please ensure a valid adapter checkpoint is provided."
                 )
-            """
-            print("keys 2 from checkpoint_dict: ", checkpoint_dict.keys())
+
             # Update the recipe state from the checkpoint state dict.
             self._update_recipe_state(checkpoint_dict)
 
