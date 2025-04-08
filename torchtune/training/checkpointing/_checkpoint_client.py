@@ -363,4 +363,5 @@ class CheckpointClient:
             log.info(
                 f"DistributedCheckpointer loaded the checkpoint in {time.perf_counter() - dcp_load_start:.2f} seconds."
             )
+
         return checkpoint_dict
