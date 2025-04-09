@@ -17,6 +17,7 @@ from torch.distributed.checkpoint.state_dict import (
     set_state_dict,
 )
 from torchtune import config, training, utils
+from torchtune.modules.peft import get_adapter_state_dict, get_merged_lora_ckpt
 from torchtune.training.checkpointing._checkpointer import DistributedCheckpointer
 from torchtune.training.memory import OptimizerInBackwardWrapper
 
@@ -115,6 +116,7 @@ class CheckpointClient:
         optimizer: Union[torch.optim.Optimizer, OptimizerInBackwardWrapper],
         training_progress: TrainingProgress,
         epoch: int,
+        adapter_config: Optional[dict[str, Any]] = None,
     ) -> None:
         """
         Checkpoint the training state asynchronously as a distributed checkpoint. Saving
@@ -159,6 +161,7 @@ class CheckpointClient:
         optimizer: Union[torch.optim.Optimizer, OptimizerInBackwardWrapper],
         training_progress: TrainingProgress,
         epoch: int,
+        adapter_config: Optional[dict[str, Any]] = None,
     ) -> None:
         """
         Checkpoint the training state synchronously.
@@ -217,10 +220,10 @@ class CheckpointClient:
                     )
                 else:
                     for param, opt in optimizer.optim_map.items():
-                        optim_state_dict[
-                            param
-                        ] = training.get_full_optimizer_state_dict(
-                            model, opt, self._is_rank_zero, device=self._device
+                        optim_state_dict[param] = (
+                            training.get_full_optimizer_state_dict(
+                                model, opt, self._is_rank_zero, device=self._device
+                            )
                         )
             else:
                 optim_state_dict = optimizer.state_dict()
@@ -233,12 +236,29 @@ class CheckpointClient:
             optim_state_dict = None
 
         def _save_checkpoint_helper():
-            checkpoint_dict.update({training.MODEL_KEY: model_state_dict})
             # if training is in-progress, checkpoint the optimizer state and recipe state
             # as well.
             if intermediate_checkpoint:
                 checkpoint_dict.update({training.OPT_KEY: optim_state_dict})
                 checkpoint_dict.update(training_progress.state_dict())
+
+            if adapter_config is not None:
+                checkpoint_dict.update(
+                    {
+                        training.ADAPTER_KEY: get_adapter_state_dict(model_state_dict),
+                        training.ADAPTER_CONFIG: adapter_config,
+                    }
+                )
+
+                get_merged_lora_ckpt(
+                    model_state_dict, adapter_config["r"], adapter_config["lora_alpha"]
+                )
+
+            checkpoint_dict.update(
+                {
+                    training.MODEL_KEY: model_state_dict,
+                }
+            )
 
             self._get_checkpointer().save_checkpoint(
                 checkpoint_dict,
@@ -267,6 +287,8 @@ class CheckpointClient:
         optimizer: Union[torch.optim.Optimizer, OptimizerInBackwardWrapper],
         training_progress: TrainingProgress,
         epoch: int,
+        adapter_config: Optional[dict[str, Any]] = None,
+        **kwargs: Any,
     ) -> None:
         """
         Checkpoint the training state.
@@ -282,9 +304,13 @@ class CheckpointClient:
         intermediate_checkpoint = epoch + 1 < training_progress.total_epochs
 
         if intermediate_checkpoint and self._enable_async_checkpointing:
-            self._save_checkpoint_async(model, optimizer, training_progress, epoch)
+            self._save_checkpoint_async(
+                model, optimizer, training_progress, epoch, adapter_config
+            )
         else:
-            self._save_checkpoint_sync(model, optimizer, training_progress, epoch)
+            self._save_checkpoint_sync(
+                model, optimizer, training_progress, epoch, adapter_config
+            )
 
     def load_base_checkpoint(self) -> Dict[str, Any]:
         """
@@ -297,6 +323,7 @@ class CheckpointClient:
         self,
         model: torch.nn.Module,
         optimizer: Union[torch.optim.Optimizer, OptimizerInBackwardWrapper],
+        adapter_config: Optional[dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """
         This method is used to resume training from a distributed checkpoint state.
@@ -318,9 +345,9 @@ class CheckpointClient:
         # code in _init_optim_state
         for param_group in optim_state_dict["param_groups"]:
             if param_group.get("initial_lr") is None:
-                param_group[
-                    "initial_lr"
-                ] = 0.0  # This will get overriden by the actual value in optimizer
+                param_group["initial_lr"] = (
+                    0.0  # This will get overriden by the actual value in optimizer
+                )
 
         checkpoint_dict.update(
             {
@@ -358,6 +385,21 @@ class CheckpointClient:
 
             if training.OPT_KEY in checkpoint_dict:
                 optimizer.load_state_dict(checkpoint_dict[training.OPT_KEY])
+
+        if adapter_config:
+            checkpoint_dict.update(
+                {
+                    training.ADAPTER_KEY: get_adapter_state_dict(
+                        checkpoint_dict[training.MODEL_KEY]
+                    ),
+                    training.ADAPTER_CONFIG: adapter_config,
+                }
+            )
+            get_merged_lora_ckpt(
+                checkpoint_dict[training.MODEL_KEY],
+                adapter_config["r"],
+                adapter_config["lora_alpha"],
+            )
 
         if self._is_rank_zero:
             log.info(
