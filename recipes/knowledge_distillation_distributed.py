@@ -26,10 +26,7 @@ from torchtune.datasets import ConcatDataset
 from torchtune.modules.peft import (
     DoRALinear,
     get_adapter_params,
-    get_adapter_state_dict,
     get_lora_module_names,
-    get_merged_lora_ckpt,
-    lora,
     LoRALinear,
     set_trainable_params,
     validate_missing_and_unexpected_for_lora,
@@ -151,6 +148,11 @@ class KDRecipeDistributed(FTRecipeInterface):
         self._save_adapter_weights_only = cfg.get("save_adapter_weights_only", False)
         self._gradient_accumulation_steps = cfg.gradient_accumulation_steps
         self._kd_ratio = cfg.get("kd_ratio", 0.5)
+
+        if self._save_adapter_weights_only and self._enable_async_checkpointing:
+            raise ValueError(
+                "Saving adapter weights only is not supported with async checkpointing."
+            )
 
     def load_teacher_checkpoint(self, cfg_checkpointer: DictConfig) -> Dict[str, Any]:
         """
