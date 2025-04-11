@@ -110,11 +110,9 @@ class _CheckpointerInterface(Protocol):
 
     """
 
-    def load_checkpoint(self, **kwargs) -> Dict[str, Any]:
-        ...
+    def load_checkpoint(self, **kwargs) -> Dict[str, Any]: ...
 
-    def save_checkpoint(self, state_dict: Dict[str, Any], **kwargs) -> None:
-        ...
+    def save_checkpoint(self, state_dict: Dict[str, Any], **kwargs) -> None: ...
 
 
 class FullModelTorchTuneCheckpointer(_CheckpointerInterface):
@@ -896,14 +894,14 @@ class FullModelHFCheckpointer(_CheckpointerInterface):
                     "Saving Llama3.2 Vision adapter weights to PEFT format is not supported, saving to torchtune format instead"
                 )
             else:
-                state_dict[
-                    training.ADAPTER_KEY
-                ] = convert_weights.tune_to_peft_adapter_weights(
-                    state_dict[training.ADAPTER_KEY],
-                    num_heads=self._config["num_attention_heads"],
-                    num_kv_heads=self._config["num_key_value_heads"],
-                    dim=self._config["hidden_size"],
-                    head_dim=self._config.get("head_dim", None),
+                state_dict[training.ADAPTER_KEY] = (
+                    convert_weights.tune_to_peft_adapter_weights(
+                        state_dict[training.ADAPTER_KEY],
+                        num_heads=self._config["num_attention_heads"],
+                        num_kv_heads=self._config["num_key_value_heads"],
+                        dim=self._config["hidden_size"],
+                        head_dim=self._config.get("head_dim", None),
+                    )
                 )
                 output_path = os.path.join(
                     self._output_dir, f"epoch_{epoch}", ADAPTER_MODEL_FNAME
@@ -941,11 +939,11 @@ class FullModelHFCheckpointer(_CheckpointerInterface):
                     "PEFT integration for Llama3.2 Vision is not supported, skipping adapter config save"
                 )
             else:
-                state_dict[
-                    training.ADAPTER_CONFIG
-                ] = convert_weights.tune_to_peft_adapter_config(
-                    adapter_config=state_dict[training.ADAPTER_CONFIG],
-                    base_model_name_or_path=self.repo_id,
+                state_dict[training.ADAPTER_CONFIG] = (
+                    convert_weights.tune_to_peft_adapter_config(
+                        adapter_config=state_dict[training.ADAPTER_CONFIG],
+                        base_model_name_or_path=self.repo_id,
+                    )
                 )
 
                 output_path = (
@@ -1311,7 +1309,10 @@ class DistributedCheckpointer(_CheckpointerInterface):
         return None
 
     def load_checkpoint(
-        self, state_dict: Dict[str, Any] = None, checkpoint_path: Optional[str] = None
+        self,
+        state_dict: Dict[str, Any] = None,
+        checkpoint_path: Optional[str] = None,
+        adapter_only: bool = False,
     ) -> Dict[str, Any]:
         """
         Load a Distributed checkpoint saved at the <checkpoint_path>
@@ -1333,6 +1334,8 @@ class DistributedCheckpointer(_CheckpointerInterface):
                     "Also, No intermediate checkpoint was found in the output directory."
                     "Please ensure that a checkpoint exists to load."
                 )
+            if adapter_only:
+                checkpoint_path = os.path.join(checkpoint_path, "adapter_model")
 
         log_rank_zero(logger, msg=f"Loading checkpoint from {checkpoint_path}")
 
@@ -1349,6 +1352,7 @@ class DistributedCheckpointer(_CheckpointerInterface):
         state_dict: Dict[str, Any],
         epoch: int,
         save_async: bool = False,
+        adapter_only: bool = False,
     ) -> None:
         """
         Save a distributed checkpoint to storage.
@@ -1370,6 +1374,8 @@ class DistributedCheckpointer(_CheckpointerInterface):
         checkpoint_path = Path.joinpath(
             self._output_dir, f"{self._checkpoint_dir_prefix}_{epoch}"
         )
+        if adapter_only:
+            checkpoint_path = Path.joinpath(checkpoint_path, "adapter_model")
 
         if self._checkpoint_future and not self._checkpoint_future.done():
             # Previous checkpoint needs to finish before saving the next one.

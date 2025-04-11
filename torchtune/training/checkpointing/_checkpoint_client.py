@@ -6,6 +6,7 @@
 
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Dict, Optional, Union
 
 import torch
@@ -19,7 +20,6 @@ from torch.distributed.checkpoint.state_dict import (
 from torchtune import config, training, utils
 from torchtune.modules.peft import get_adapter_state_dict, get_merged_lora_ckpt
 from torchtune.training.checkpointing._checkpointer import DistributedCheckpointer
-from torchtune.training.checkpointing._utils import safe_torch_load
 from torchtune.training.memory import OptimizerInBackwardWrapper
 
 log = utils.get_logger("DEBUG")
@@ -118,6 +118,7 @@ class CheckpointClient:
         training_progress: TrainingProgress,
         epoch: int,
         adapter_config: Optional[dict[str, Any]] = None,
+        adapter_only: bool = False,
     ) -> None:
         """
         Checkpoint the training state asynchronously as a distributed checkpoint. Saving
@@ -144,22 +145,48 @@ class CheckpointClient:
         ckpt_dict[training.MODEL_KEY] = model.state_dict()
         ckpt_dict[training.OPT_KEY] = optimizer.state_dict()
 
-        dcp_saver = self._get_dcp_checkpointer()
-        dcp_saver.save_checkpoint(
-            ckpt_dict,
-            epoch=epoch,
-            save_async=True,
-        )
-
-        if self._is_rank_zero:
-            log.info(
-                f"Saving asynchronous checkpoint took {time.perf_counter() - cp_start:.2f} secs"
+        if adapter_config is not None:
+            ckpt_dict.update(
+                {
+                    training.ADAPTER_KEY: get_adapter_state_dict(
+                        ckpt_dict[training.MODEL_KEY]
+                    ),
+                    training.ADAPTER_CONFIG: adapter_config,
+                }
             )
+
+            get_merged_lora_ckpt(
+                ckpt_dict[training.MODEL_KEY],
+                adapter_config["r"],
+                adapter_config["lora_alpha"],
+            )
+
+        dcp_saver = self._get_dcp_checkpointer()
+        if not adapter_only:
+            dcp_saver.save_checkpoint(
+                ckpt_dict,
+                epoch=epoch,
+                save_async=True,
+            )
+
+            if self._is_rank_zero:
+                log.info(
+                    f"Saving asynchronous checkpoint took {time.perf_counter() - cp_start:.2f} secs"
+                )
 
         if adapter_config is not None:
-            self._get_checkpointer().save_checkpoint(
-                ckpt_dict, epoch=epoch, adapter_only=True
+            adapter_start = time.perf_counter()
+            dcp_saver.save_checkpoint(
+                ckpt_dict[training.ADAPTER_KEY],
+                epoch=epoch,
+                save_async=True,
+                adapter_only=True,
             )
+
+            if self._is_rank_zero:
+                log.info(
+                    f"Saving asynchronous checkpoint for adapter weights took {time.perf_counter() - adapter_start:.2f} secs"
+                )
 
     def _save_checkpoint_sync(
         self,
@@ -227,10 +254,10 @@ class CheckpointClient:
                     )
                 else:
                     for param, opt in optimizer.optim_map.items():
-                        optim_state_dict[
-                            param
-                        ] = training.get_full_optimizer_state_dict(
-                            model, opt, self._is_rank_zero, device=self._device
+                        optim_state_dict[param] = (
+                            training.get_full_optimizer_state_dict(
+                                model, opt, self._is_rank_zero, device=self._device
+                            )
                         )
             else:
                 optim_state_dict = optimizer.state_dict()
@@ -331,6 +358,8 @@ class CheckpointClient:
         self,
         model: torch.nn.Module,
         optimizer: Union[torch.optim.Optimizer, OptimizerInBackwardWrapper],
+        adapter_config: Optional[dict[str, Any]] = None,
+        adapter_only: bool = False,
     ) -> Dict[str, Any]:
         """
         This method is used to resume training from a distributed checkpoint state.
@@ -352,9 +381,9 @@ class CheckpointClient:
         # code in _init_optim_state
         for param_group in optim_state_dict["param_groups"]:
             if param_group.get("initial_lr") is None:
-                param_group[
-                    "initial_lr"
-                ] = 0.0  # This will get overriden by the actual value in optimizer
+                param_group["initial_lr"] = (
+                    0.0  # This will get overriden by the actual value in optimizer
+                )
 
         checkpoint_dict.update(
             {
@@ -366,6 +395,31 @@ class CheckpointClient:
                 training.MAX_STEPS_KEY: 0,
             }
         )
+
+        if adapter_config is not None:
+            get_merged_lora_ckpt(
+                checkpoint_dict[training.MODEL_KEY],
+                adapter_config["r"],
+                adapter_config["lora_alpha"],
+            )
+            checkpoint_dict.update(
+                {
+                    training.ADAPTER_KEY: get_adapter_state_dict(
+                        checkpoint_dict[training.MODEL_KEY]
+                    ),
+                }
+            )
+
+        if adapter_only:
+            checkpoint_dict = self._get_dcp_checkpointer().load_checkpoint(
+                checkpoint_dict[training.ADAPTER_KEY],
+                adapter_only=True,
+            )
+            if self._is_rank_zero:
+                log.info(
+                    f"DistributedCheckpointer loaded the adapter checkpoint in {time.perf_counter() - dcp_load_start:.2f} seconds."
+                )
+            return checkpoint_dict
 
         # Load the checkpoint state dict from the distributed checkpoint
         checkpoint_dict = self._get_dcp_checkpointer().load_checkpoint(checkpoint_dict)
@@ -392,12 +446,6 @@ class CheckpointClient:
 
             if training.OPT_KEY in checkpoint_dict:
                 optimizer.load_state_dict(checkpoint_dict[training.OPT_KEY])
-
-        adapter_checkpoint_path = self._get_checkpointer()._adapter_checkpoint
-        if adapter_checkpoint_path:
-            checkpoint_dict[training.ADAPTER_KEY] = safe_torch_load(
-                adapter_checkpoint_path
-            )
 
         if self._is_rank_zero:
             log.info(
