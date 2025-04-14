@@ -16,9 +16,14 @@ from torch.distributed.checkpoint.state_dict import (
     _init_optim_state,
     set_model_state_dict,
     set_state_dict,
+    StateDictOptions,
 )
 from torchtune import config, training, utils
-from torchtune.modules.peft import get_adapter_state_dict, get_merged_lora_ckpt
+from torchtune.modules.peft import (
+    get_adapter_state_dict,
+    get_merged_lora_ckpt,
+    validate_missing_and_unexpected_for_lora,
+)
 from torchtune.training.checkpointing._checkpointer import DistributedCheckpointer
 from torchtune.training.memory import OptimizerInBackwardWrapper
 
@@ -149,7 +154,8 @@ class CheckpointClient:
             ckpt_dict.update(
                 {
                     training.ADAPTER_KEY: get_adapter_state_dict(
-                        ckpt_dict[training.MODEL_KEY]
+                        ckpt_dict[training.MODEL_KEY],
+                        device=None,
                     ),
                     training.ADAPTER_CONFIG: adapter_config,
                 }
@@ -176,6 +182,7 @@ class CheckpointClient:
 
         if adapter_config is not None:
             adapter_start = time.perf_counter()
+
             dcp_saver.save_checkpoint(
                 ckpt_dict[training.ADAPTER_KEY],
                 epoch=epoch,
@@ -397,17 +404,18 @@ class CheckpointClient:
         )
 
         if adapter_config is not None:
-            get_merged_lora_ckpt(
-                checkpoint_dict[training.MODEL_KEY],
-                adapter_config["r"],
-                adapter_config["lora_alpha"],
-            )
             checkpoint_dict.update(
                 {
                     training.ADAPTER_KEY: get_adapter_state_dict(
                         checkpoint_dict[training.MODEL_KEY]
                     ),
                 }
+            )
+
+            get_merged_lora_ckpt(
+                checkpoint_dict[training.MODEL_KEY],
+                adapter_config["r"],
+                adapter_config["lora_alpha"],
             )
 
         if adapter_only:
@@ -424,28 +432,50 @@ class CheckpointClient:
         # Load the checkpoint state dict from the distributed checkpoint
         checkpoint_dict = self._get_dcp_checkpointer().load_checkpoint(checkpoint_dict)
 
+        options = StateDictOptions(strict=False)
         # Load the checkpoint state dict into model and optimizer
         if not self._optimizer_in_bwd:
             if training.OPT_KEY in checkpoint_dict:
-                set_state_dict(
+                base_missing, base_unexpected = set_state_dict(
                     model,
                     optimizer,
                     model_state_dict=checkpoint_dict[training.MODEL_KEY],
                     optim_state_dict=checkpoint_dict[training.OPT_KEY],
+                    options=options,
                 )
             else:
-                set_model_state_dict(
+                base_missing, base_unexpected = set_model_state_dict(
                     model=model,
                     model_state_dict=checkpoint_dict[training.MODEL_KEY],
+                    options=options,
                 )
         else:
-            set_model_state_dict(
+            base_missing, base_unexpected = set_model_state_dict(
                 model=model,
                 model_state_dict=checkpoint_dict[training.MODEL_KEY],
+                options=options,
             )
 
             if training.OPT_KEY in checkpoint_dict:
                 optimizer.load_state_dict(checkpoint_dict[training.OPT_KEY])
+
+        if training.ADAPTER_KEY in checkpoint_dict:
+            lora_missing, lora_unexpected = set_model_state_dict(
+                model=model,
+                model_state_dict=checkpoint_dict[training.ADAPTER_KEY],
+                options=options,
+            )
+
+            validate_missing_and_unexpected_for_lora(
+                lora_attn_modules=[],
+                apply_lora_to_mlp=False,  # dummy value
+                apply_lora_to_output=False,  # dummy value
+                state_dict_keys=model.state_dict().keys(),
+                base_missing=base_missing,
+                base_unexpected=base_unexpected,
+                lora_missing=lora_missing,
+                lora_unexpected=lora_unexpected,
+            )
 
         if self._is_rank_zero:
             log.info(

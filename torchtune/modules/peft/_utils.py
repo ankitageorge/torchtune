@@ -120,7 +120,8 @@ def get_adapter_state_dict(
 
     Args:
         state_dict (Dict[str, Any]): Full model state dict.
-        device (Optional[str]): device to move adapter parameters to. Default: 'cpu'
+        device (Optional[str]): device to move adapter parameters to. If None, then
+                                doesn't move devices. Default: 'cpu'
 
     Returns:
         Dict[str, Any]: the subset of model's state dict containing
@@ -128,7 +129,10 @@ def get_adapter_state_dict(
 
     """
     adapter_key_filter = lambda x: "lora" in x or "magnitude" in x
-    return {k: v.to(device) for k, v in state_dict.items() if adapter_key_filter(k)}
+    if device is not None:
+        return {k: v.to(device) for k, v in state_dict.items() if adapter_key_filter(k)}
+    else:
+        return {k: v.clone() for k, v in state_dict.items() if adapter_key_filter(k)}
 
 
 def _get_lora_modules(state_dict: Dict[str, Any]) -> Set[str]:
@@ -201,7 +205,6 @@ def get_merged_lora_ckpt(
             state_dict[f"{module}.weight"] += (
                 (alpha / rank) * lora_b_weight @ lora_a_weight
             )
-
         del state_dict[f"{module}.lora_a.weight"]
         del state_dict[f"{module}.lora_b.weight"]
 
