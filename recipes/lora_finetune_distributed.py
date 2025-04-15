@@ -272,7 +272,7 @@ class LoRAFinetuneRecipeDistributed(FTRecipeInterface):
             cfg_optimizer=cfg.optimizer,
             opt_state_dict=(
                 checkpoint_dict[training.OPT_KEY]
-                if self._resume_from_checkpoint
+                if training.OPT_KEY in checkpoint_dict
                 else None
             ),
         )
@@ -289,6 +289,7 @@ class LoRAFinetuneRecipeDistributed(FTRecipeInterface):
                             self._model,
                             self._optimizer,
                             self._adapter_config,
+                            self._save_adapter_weights_only,
                         )
                     )
                 except Exception as e:
@@ -325,7 +326,7 @@ class LoRAFinetuneRecipeDistributed(FTRecipeInterface):
             collate_fn=collate_name,
             dataloader_state_dict=(
                 checkpoint_dict[training.DATALOADER_KEY]
-                if self._resume_from_checkpoint
+                if training.DATALOADER_KEY in checkpoint_dict
                 else None
             ),
         )
@@ -664,9 +665,11 @@ class LoRAFinetuneRecipeDistributed(FTRecipeInterface):
                 epochs_run=self.epochs_run,
                 total_epochs=self.total_epochs,
                 max_steps_per_epoch=self.max_steps_per_epoch,
+                dataloader_state_dict=self._dataloader.state_dict(),
             ),
             epoch=epoch,
             adapter_config=self._adapter_config.copy(),
+            adapter_only=self._save_adapter_weights_only,
         )
 
     def train(self) -> None:
