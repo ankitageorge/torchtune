@@ -189,11 +189,6 @@ class LoRADPORecipeDistributed(FTRecipeInterface):
         self._save_adapter_weights_only = cfg.get("save_adapter_weights_only", False)
         self._gradient_accumulation_steps = cfg.gradient_accumulation_steps
 
-        if self._save_adapter_weights_only and self._enable_async_checkpointing:
-            raise ValueError(
-                "save_adapter_weights_only is not supported with async checkpointing."
-            )
-
     def _update_recipe_state(self, ckpt_dict: Dict[str, Any]) -> None:
         """
         Updates the recipe state from checkpoint.
@@ -283,7 +278,10 @@ class LoRADPORecipeDistributed(FTRecipeInterface):
                 try:
                     checkpoint_dict = (
                         self._checkpoint_client.load_distributed_checkpoint(
-                            self._model, self._optimizer, self._adapter_config
+                            self._model,
+                            self._optimizer,
+                            self._adapter_config,
+                            adapter_only=self._save_adapter_weights_only,
                         )
                     )
                 except Exception as e:
@@ -560,9 +558,11 @@ class LoRADPORecipeDistributed(FTRecipeInterface):
                 epochs_run=self.epochs_run,
                 total_epochs=self.total_epochs,
                 max_steps_per_epoch=self.max_steps_per_epoch,
+                dataloader_state_dict=self._dataloader.state_dict(),
             ),
             epoch=epoch,
             adapter_config=self._adapter_config.copy(),
+            adapter_only=self._save_adapter_weights_only,
         )
 
     def concatenated_forward(
@@ -628,6 +628,7 @@ class LoRADPORecipeDistributed(FTRecipeInterface):
 
         # self.epochs_run should be non-zero when we're resuming from a checkpoint
         for curr_epoch in range(self.epochs_run, self.total_epochs):
+
             # Update the sampler to ensure data is correctly shuffled across epochs
             # in case shuffle is True
             pbar = tqdm(total=self._steps_per_epoch, disable=not (self.rank == 0))
@@ -704,6 +705,7 @@ class LoRADPORecipeDistributed(FTRecipeInterface):
                 )
 
                 loss.backward()
+
                 # Step with optimizer
                 if (idx + 1) % self._gradient_accumulation_steps == 0:
                     # Accumulate running metrics across all devices
@@ -722,7 +724,7 @@ class LoRADPORecipeDistributed(FTRecipeInterface):
                     # Update the number of steps when the weights are updated
                     self.global_step += 1
 
-                    loss_to_log = running_loss.item()
+                    loss_to_log = running_loss.detach().item()
                     pbar.update(1)
                     pbar.set_description(
                         f"{curr_epoch + 1}|{self.global_step}|Loss: {loss_to_log}"

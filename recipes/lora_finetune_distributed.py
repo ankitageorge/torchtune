@@ -328,11 +328,6 @@ class LoRAFinetuneRecipeDistributed(FTRecipeInterface):
             shuffle=cfg.shuffle,
             batch_size=cfg.batch_size,
             collate_fn=collate_name,
-            dataloader_state_dict=(
-                checkpoint_dict[training.DATALOADER_KEY]
-                if training.DATALOADER_KEY in checkpoint_dict
-                else None
-            ),
         )
 
         # Setup validation dataloader if validation dataset is provided
@@ -625,7 +620,6 @@ class LoRAFinetuneRecipeDistributed(FTRecipeInterface):
         shuffle: bool,
         batch_size: int,
         collate_fn: str,
-        dataloader_state_dict: Optional[Dict[str, Any]] = None,
     ) -> StatefulDataLoader:
         """
         All data related setup happens here. This recipe currently supports only

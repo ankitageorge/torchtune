@@ -310,8 +310,6 @@ class TestQATLoRAFinetuneDistributedRecipe:
         expected_loss_values = self._fetch_expected_loss_values(model_type)[2:]
 
         loss_values = get_loss_values_from_metric_logger(log_file)
-        print("loss values", loss_values)
-        print("expected loss values", expected_loss_values)
         torch.testing.assert_close(
             loss_values, expected_loss_values, rtol=1e-5, atol=1e-5
         )
