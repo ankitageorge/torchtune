@@ -155,7 +155,6 @@ class CheckpointClient:
                 {
                     training.ADAPTER_KEY: get_adapter_state_dict(
                         ckpt_dict[training.MODEL_KEY],
-                        device=None,
                     ),
                     training.ADAPTER_CONFIG: adapter_config,
                 }
@@ -213,7 +212,6 @@ class CheckpointClient:
         To correctly resume training from this checkpoint, user needs to have both
         resume_from_checkpoint flag set to True and recipe file paths set in the config.
         """
-
         intermediate_checkpoint = epoch + 1 < training_progress.total_epochs
         checkpointer = self._get_checkpointer()
         no_dist = not isinstance(checkpointer, DistributedCheckpointer)
