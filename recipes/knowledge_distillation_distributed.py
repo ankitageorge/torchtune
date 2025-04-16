@@ -12,7 +12,7 @@ from typing import Any, Dict, List, Optional, Union
 from warnings import warn
 
 import torch
-from omegaconf import DictConfig, ListConfig
+from omegaconf import DictConfig, ListConfig, OmegaConf
 
 from torch import nn
 from torch.distributed import destroy_process_group, init_process_group
@@ -153,10 +153,14 @@ class KDRecipeDistributed(FTRecipeInterface):
         """
         Extract the teacher checkpoint state from file.
         """
-        teacher_checkpointer = config.instantiate(
-            cfg_checkpointer,
+        # add checkpointer class to config to work with checkpoint_client
+        checkpointer_dict = {"checkpointer": cfg_checkpointer}
+
+        new_cfg_checkpointer = OmegaConf.create(checkpointer_dict)
+        teacher_checkpoint_client = CheckpointClient(
+            new_cfg_checkpointer,
         )
-        checkpoint_dict = teacher_checkpointer.load_checkpoint()
+        checkpoint_dict = teacher_checkpoint_client.load_base_checkpoint()
         return checkpoint_dict
 
     def _update_recipe_state(self, ckpt_dict: Dict[str, Any]) -> None:

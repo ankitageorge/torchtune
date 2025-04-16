@@ -306,7 +306,11 @@ class QATRecipeDistributed(FTRecipeInterface):
                     checkpoint_dict = (
                         self._checkpoint_client.load_distributed_checkpoint(
                             self._model,
-                            self._optimizer,
+                            (
+                                self._optim_ckpt_wrapper
+                                if self._optimizer_in_bwd
+                                else self._optimizer
+                            ),
                         )
                     )
                 except Exception as e:
@@ -661,7 +665,11 @@ class QATRecipeDistributed(FTRecipeInterface):
     ) -> None:
         self._checkpoint_client.save_checkpoint(
             model=self._model,
-            optimizer=self._optimizer,
+            optimizer=(
+                self._optimizer
+                if not self._optimizer_in_bwd
+                else self._optim_ckpt_wrapper
+            ),
             training_progress=TrainingProgress(
                 seed=self.seed,
                 epochs_run=self.epochs_run,
