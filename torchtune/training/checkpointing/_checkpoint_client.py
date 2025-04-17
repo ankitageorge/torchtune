@@ -78,7 +78,8 @@ class CheckpointClient:
             "enable_async_checkpointing", False
         )
         self._optimizer_in_bwd = self._cfg.get("optimizer_in_bwd", False)
-        self._device = utils.get_device(device=self._cfg.device)
+        device = self._cfg.get("device", None)
+        self._device = utils.get_device(device=device)
 
         _, self._rank = utils.get_world_size_and_rank()
         self._is_rank_zero = self._rank == 0
@@ -258,10 +259,10 @@ class CheckpointClient:
                     )
                 else:
                     for param, opt in optimizer.optim_map.items():
-                        optim_state_dict[
-                            param
-                        ] = training.get_full_optimizer_state_dict(
-                            model, opt, self._is_rank_zero, device=self._device
+                        optim_state_dict[param] = (
+                            training.get_full_optimizer_state_dict(
+                                model, opt, self._is_rank_zero, device=self._device
+                            )
                         )
             else:
                 optim_state_dict = optimizer.state_dict()
@@ -386,9 +387,9 @@ class CheckpointClient:
         if "param_groups" in optim_state_dict:
             for param_group in optim_state_dict["param_groups"]:
                 if param_group.get("initial_lr") is None:
-                    param_group[
-                        "initial_lr"
-                    ] = 0.0  # This will get overriden by the actual value in optimizer
+                    param_group["initial_lr"] = (
+                        0.0  # This will get overriden by the actual value in optimizer
+                    )
 
         checkpoint_dict.update(
             {
