@@ -532,11 +532,11 @@ class FullModelHFCheckpointer(_CheckpointerInterface):
         if self._enable_dcp:
             from torch.distributed.checkpoint import (
                 _HuggingFaceLoadPlanner,
-                _HuggingFaceStorageReader,
+                HuggingFaceStorageReader,
             )
 
             # DCP load using the storage reader
-            hf_storage_reader = _HuggingFaceStorageReader(path=self._checkpoint_dir)
+            hf_storage_reader = HuggingFaceStorageReader(path=self._checkpoint_dir)
             metadata = hf_storage_reader.read_metadata()
             state_dict = {}
             for key in metadata.state_dict_metadata.keys():
@@ -814,7 +814,7 @@ class FullModelHFCheckpointer(_CheckpointerInterface):
             if self._enable_dcp:
                 from torch.distributed.checkpoint import (
                     _HuggingFaceSavePlanner,
-                    _HuggingFaceStorageWriter,
+                    HuggingFaceStorageWriter,
                 )
 
                 # DCP save using the storage writer
@@ -822,7 +822,7 @@ class FullModelHFCheckpointer(_CheckpointerInterface):
                 for fqn, filename in self._weight_map.items():
                     index = int(filename.split("-")[1])
                     fqn_to_file_index_mapping[fqn] = index
-                storage_writer = _HuggingFaceStorageWriter(
+                storage_writer = HuggingFaceStorageWriter(
                     path=os.path.join(self._output_dir, f"epoch_{epoch}"),
                     fqn_to_index_mapping=fqn_to_file_index_mapping,
                 )
