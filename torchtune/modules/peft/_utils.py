@@ -10,6 +10,7 @@ from typing import Any, Generator, Literal, Optional, Protocol, runtime_checkabl
 import torch
 import torch.distributed as dist
 from torch import nn
+from torch.distributed.tensor.parallel import parallelize_module
 from torchtune.utils._logging import deprecate_parameter
 
 # Modules from MultiHeadAttention that LoRA can be applied to
@@ -245,14 +246,11 @@ def get_merged_lora_ckpt(
             state_dict[f"{module}.weight"] = merged_weight
             del state_dict[f"{module}.magnitude"]
 
-        # Otherwise it is just vanilla LoRA
         else:
-            # Use out-of-place addition instead of in-place addition to support NF4Tensor
-            # which doesn't support in-place operations like aten.add_.Tensor
-            lora_weight = (alpha / rank) * lora_b_weight @ lora_a_weight
-            state_dict[f"{module}.weight"] = (
-                state_dict[f"{module}.weight"] + lora_weight
+            state_dict[f"{module}.weight"] += (
+                (alpha / rank) * lora_b_weight @ lora_a_weight
             )
+            print("in place add done")
 
         del state_dict[f"{module}.lora_a.weight"]
         del state_dict[f"{module}.lora_b.weight"]
@@ -265,12 +263,13 @@ def get_merged_lora_dist_ckpt(
     state_dict: dict[str, Any],
     rank: int,
     alpha: float,
-    process_group=None,
+    device_mesh: Any,
 ) -> dict[str, Any]:
     """
     Merge LoRA weights into the base model format for efficient inference using distributed operations.
     This function is designed for distributed training scenarios and uses distributed operations
-    like distributed matrix multiplication.
+    like distributed matrix multiplication. It supports FSDP (Fully Sharded Data Parallel) when
+    fsdp_enabled is set to True.
 
     NOTE: This function modifies state_dict inplace. If you do not want to do that,
     make a copy prior to calling this function.
@@ -282,14 +281,16 @@ def get_merged_lora_dist_ckpt(
         state_dict (dict[str, Any]): State dict from a model.
         rank (int): The rank of LoRA matrices.
         alpha (float): The alpha value used for scaling LoRA decompositions.
-        process_group: The process group to use for distributed operations. Default: None (use default process group)
+        device_mesh: Optional DeviceMesh to use for distributed operations. Default: None
 
     Returns:
         dict[str, Any]: The merged state dict.
     """
+
     lora_modules = _get_lora_modules(state_dict)
     lora_moe_modules = _get_lora_moe_modules(state_dict)
-    for module in lora_modules.union(lora_moe_modules):
+
+    for module in sorted(lora_modules.union(lora_moe_modules)):
         # TODO: we don't currently support DoRA for MoE layers
         if "experts" in module:
             for param in ["gate", "up", "down"]:
@@ -300,19 +301,19 @@ def get_merged_lora_dist_ckpt(
                 transposed_b = lora_b_weight.transpose(1, 2)
                 transposed_a = lora_a_weight.transpose(1, 2)
 
-                # Perform distributed matrix multiplication
-                if dist.is_initialized():
-                    # Synchronize before operation
-                    dist.barrier(group=process_group)
+                dist.barrier()
 
-                    # Distributed matrix multiplication
-                    result = (alpha / rank) * torch.matmul(transposed_b, transposed_a)
+                # Create a simple module for matrix multiplication
+                class MatMulModule(torch.nn.Module):
+                    def forward(self, x, y):
+                        return (alpha / rank) * torch.matmul(x, y)
 
-                    # Ensure all processes have the same result
-                    dist.all_reduce(result, op=dist.ReduceOp.AVG, group=process_group)
-                else:
-                    # Fallback to regular matmul if distributed is not initialized
-                    result = (alpha / rank) * transposed_b @ transposed_a
+                mm_module = MatMulModule()
+                # Parallelize the module across the device mesh
+                parallel_mm = parallelize_module(
+                    mm_module, device_mesh, {"x": 0, "y": 1}
+                )
+                result = parallel_mm(transposed_b, transposed_a)
 
                 # Apply the result using out-of-place addition
                 proj_weight = state_dict[f"{module}.{param}_proj"]
@@ -332,30 +333,29 @@ def get_merged_lora_dist_ckpt(
         if lora_magnitude is not None:
             base_weight = state_dict[f"{module}.weight"].to(lora_a_weight.dtype)
 
-            # Use distributed operations for matrix multiplication
-            if dist.is_initialized():
-                # Synchronize before operation
-                dist.barrier(group=process_group)
+            # Create a simple module for matrix multiplication
+            class MatMulModule(torch.nn.Module):
+                def forward(self, x, y):
+                    return (alpha / rank) * torch.matmul(x, y)
 
-                # Distributed matrix multiplication
-                lora_weight = (alpha / rank) * torch.matmul(
-                    lora_b_weight, lora_a_weight
-                )
-
-                # Ensure all processes have the same result
-                dist.all_reduce(lora_weight, op=dist.ReduceOp.AVG, group=process_group)
-            else:
-                # Fallback to regular matmul if distributed is not initialized
-                lora_weight = (alpha / rank) * lora_b_weight @ lora_a_weight
+            mm_module = MatMulModule()
+            dist.barrier()
+            # Parallelize the module across the device mesh
+            parallel_mm = parallelize_module(mm_module, device_mesh, {"x": 0, "y": 1})
+            lora_weight = parallel_mm(lora_b_weight, lora_a_weight)
 
             merged_weight = base_weight + lora_weight
 
-            # Use distributed operations for norm calculation
-            if dist.is_initialized():
-                weight_norm = torch.linalg.norm(merged_weight, dim=1)
-                dist.all_reduce(weight_norm, op=dist.ReduceOp.AVG, group=process_group)
-            else:
-                weight_norm = torch.linalg.norm(merged_weight, dim=1)
+            # Create a simple module for norm calculation
+            class NormModule(torch.nn.Module):
+                def forward(self, x):
+                    return torch.linalg.norm(x, dim=1)
+
+            norm_module = NormModule()
+            dist.barrier()
+            # Parallelize the module across the device mesh
+            parallel_norm = parallelize_module(norm_module, device_mesh, {"x": 0})
+            weight_norm = parallel_norm(merged_weight)
 
             mag_norm_scale = (lora_magnitude / weight_norm).view(-1, 1)
             merged_weight *= mag_norm_scale
@@ -364,30 +364,23 @@ def get_merged_lora_dist_ckpt(
 
         # Otherwise it is just vanilla LoRA
         else:
-            # Use distributed operations for matrix multiplication
-            if dist.is_initialized():
-                # Synchronize before operation
-                dist.barrier(group=process_group)
+            # Create a simple module for matrix multiplication
+            class MatMulModule(torch.nn.Module):
+                def forward(self, x, y):
+                    return (alpha / rank) * torch.matmul(x, y)
 
-                # Distributed matrix multiplication
-                lora_weight = (alpha / rank) * torch.matmul(
-                    lora_b_weight, lora_a_weight
-                )
+            mm_module = MatMulModule()
+            dist.barrier()
+            # Parallelize the module across the device mesh
+            parallel_mm = parallelize_module(mm_module, device_mesh, {"x": 0, "y": 1})
+            lora_weight = parallel_mm(lora_b_weight, lora_a_weight)
 
-                # Ensure all processes have the same result
-                dist.all_reduce(lora_weight, op=dist.ReduceOp.AVG, group=process_group)
-            else:
-                # Fallback to regular matmul if distributed is not initialized
-                lora_weight = (alpha / rank) * lora_b_weight @ lora_a_weight
-
-            # Use out-of-place addition to support NF4Tensor
-            state_dict[f"{module}.weight"] = (
-                state_dict[f"{module}.weight"] + lora_weight
-            )
+            state_dict[f"{module}.weight"] += lora_weight
+            print("in place add done")
 
         del state_dict[f"{module}.lora_a.weight"]
         del state_dict[f"{module}.lora_b.weight"]
-
+    dist.barrier()
     return state_dict
 
 

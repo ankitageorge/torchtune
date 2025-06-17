@@ -151,6 +151,25 @@ class LoRAFinetuneRecipeDistributed(FTRecipeInterface):
         init_process_group(self.distributed_backend)
 
         self.world_size, self.rank = utils.get_world_size_and_rank()
+        self.tp_plan = cfg.get("tensor_parallel_plan", None)
+        self.tp_degree = cfg.get("tensor_parallel_dim", 1)
+        if self.tp_degree > 1 and self.tp_plan is None:
+            raise ValueError(
+                "Tensor Parallel plan needs to be provided when tensor parallel is enabled."
+            )
+        self.cp_degree = cfg.get("context_parallel_dim", 1)
+        data_shard = cfg.get("data_parallel_shard_dim", -1)  # -1 means to infer
+        data_replicate = cfg.get("data_parallel_replicate_dim", 1)
+
+        # Set up n-d device mesh
+        self.parallel_dims = training.ParallelDims(
+            dp_replicate=data_replicate,
+            dp_shard=data_shard,
+            tp=self.tp_degree,
+            cp=self.cp_degree,
+            world_size=self.world_size,
+        )
+        self.world_mesh = self.parallel_dims.build_mesh(device_type=self._device.type)
 
         self._is_rank_zero = self.rank == 0
 
@@ -171,7 +190,7 @@ class LoRAFinetuneRecipeDistributed(FTRecipeInterface):
             self._log_peak_memory_stats = False
 
         self._enable_async_checkpointing = cfg.get("enable_async_checkpointing", False)
-        self._checkpoint_client = CheckpointClient(cfg)
+        self._checkpoint_client = CheckpointClient(cfg, world_mesh=self.world_mesh)
 
         # These attributes constitute the recipe state and are updated by ``load_checkpoint``
         # when ``resume_from_checkpoint`` is ``True``
@@ -687,7 +706,8 @@ class LoRAFinetuneRecipeDistributed(FTRecipeInterface):
             pbar = tqdm(total=self._steps_per_epoch, disable=not (self.rank == 0))
             self._dataloader.sampler.set_epoch(curr_epoch)
             for idx, batch in enumerate(self._dataloader):
-                break
+                if idx > 2:
+                    break
                 # Start tracking CUDA memory for active steps for just the first epoch
                 if (
                     self._is_rank_zero

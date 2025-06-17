@@ -71,6 +71,7 @@ class CheckpointClient:
         self,
         cfg: DictConfig,
         checkpointer: Optional[Any] = None,
+        world_mesh: Optional[Any] = None,
     ) -> None:
         self._cfg = cfg
 
@@ -90,6 +91,7 @@ class CheckpointClient:
 
         _, self._rank = utils.get_world_size_and_rank()
         self._is_rank_zero = self._rank == 0
+        self._world_mesh = world_mesh
 
     def _get_checkpointer(self):
         """
@@ -170,6 +172,7 @@ class CheckpointClient:
                 ckpt_dict[training.MODEL_KEY],
                 adapter_config["r"],
                 adapter_config["lora_alpha"],
+                self._world_mesh,
             )
 
         dcp_saver = self._get_dcp_checkpointer()
