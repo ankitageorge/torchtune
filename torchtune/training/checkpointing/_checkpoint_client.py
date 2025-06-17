@@ -23,6 +23,7 @@ from torchtune.modules.optim import OptimizerInBackward
 from torchtune.modules.peft import (
     get_adapter_state_dict,
     get_merged_lora_ckpt,
+    get_merged_lora_dist_ckpt,
     validate_missing_and_unexpected_for_lora,
 )
 from torchtune.training.checkpointing._checkpointer import DistributedCheckpointer
@@ -165,8 +166,7 @@ class CheckpointClient:
                     training.ADAPTER_CONFIG: adapter_config,
                 }
             )
-
-            get_merged_lora_ckpt(
+            get_merged_lora_dist_ckpt(
                 ckpt_dict[training.MODEL_KEY],
                 adapter_config["r"],
                 adapter_config["lora_alpha"],
@@ -255,6 +255,9 @@ class CheckpointClient:
                 log.info(
                     f"Getting full model state dict took {time.perf_counter() - cp_start:.2f} secs"
                 )
+                log.info(
+                    "Time now is {}".format(time.strftime("%H:%M:%S", time.gmtime()))
+                )
         elif is_not_distributed_checkpointer:
             model_state_dict = {k: v.cpu() for k, v in model.state_dict().items()}
         else:
@@ -269,10 +272,10 @@ class CheckpointClient:
                 # This check can be removed once we fully migrate over to ``OptimizerInBackward``
                 if isinstance(optimizer, OptimizerInBackwardWrapper):
                     for param, opt in optimizer.optim_map.items():
-                        optim_state_dict[
-                            param
-                        ] = training.get_full_optimizer_state_dict(
-                            model, opt, self._is_rank_zero, device=self._device
+                        optim_state_dict[param] = (
+                            training.get_full_optimizer_state_dict(
+                                model, opt, self._is_rank_zero, device=self._device
+                            )
                         )
                 elif isinstance(optimizer, OptimizerInBackward):
                     optim_state_dict = optimizer.state_dict()
@@ -414,9 +417,9 @@ class CheckpointClient:
         if "param_groups" in optim_state_dict:
             for param_group in optim_state_dict["param_groups"]:
                 if param_group.get("initial_lr") is None:
-                    param_group[
-                        "initial_lr"
-                    ] = 0.0  # This will get overriden by the actual value in optimizer
+                    param_group["initial_lr"] = (
+                        0.0  # This will get overriden by the actual value in optimizer
+                    )
 
         checkpoint_dict.update(
             {

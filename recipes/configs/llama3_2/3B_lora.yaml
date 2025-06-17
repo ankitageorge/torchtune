@@ -46,6 +46,7 @@ checkpointer:
   model_type: LLAMA3_2
 resume_from_checkpoint: False
 save_adapter_weights_only: False
+enable_async_checkpointing: True
 
 # Dataset and Sampler
 dataset:
@@ -77,7 +78,7 @@ loss:
   _component_: torchtune.modules.loss.LinearCrossEntropyLoss
 
 # Training
-epochs: 1
+epochs: 2
 max_steps_per_epoch: null
 gradient_accumulation_steps: 8  # Use to increase effective batch size
 clip_grad_norm: null

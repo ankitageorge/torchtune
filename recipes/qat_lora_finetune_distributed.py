@@ -707,6 +707,8 @@ class QATLoRAFinetuneRecipeDistributed(FTRecipeInterface):
             pbar = tqdm(total=self._steps_per_epoch, disable=not (self.rank == 0))
             self._dataloader.sampler.set_epoch(curr_epoch)
             for idx, batch in enumerate(self._dataloader):
+                if idx > 2:
+                    break
                 if (
                     self.max_steps_per_epoch is not None
                     and (idx // self._gradient_accumulation_steps)

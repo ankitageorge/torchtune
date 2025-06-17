@@ -8,6 +8,7 @@ import contextlib
 from typing import Any, Generator, Literal, Optional, Protocol, runtime_checkable, Union
 
 import torch
+import torch.distributed as dist
 from torch import nn
 from torchtune.utils._logging import deprecate_parameter
 
@@ -246,8 +247,142 @@ def get_merged_lora_ckpt(
 
         # Otherwise it is just vanilla LoRA
         else:
-            state_dict[f"{module}.weight"] += (
-                (alpha / rank) * lora_b_weight @ lora_a_weight
+            # Use out-of-place addition instead of in-place addition to support NF4Tensor
+            # which doesn't support in-place operations like aten.add_.Tensor
+            lora_weight = (alpha / rank) * lora_b_weight @ lora_a_weight
+            state_dict[f"{module}.weight"] = (
+                state_dict[f"{module}.weight"] + lora_weight
+            )
+
+        del state_dict[f"{module}.lora_a.weight"]
+        del state_dict[f"{module}.lora_b.weight"]
+
+    return state_dict
+
+
+@torch.no_grad
+def get_merged_lora_dist_ckpt(
+    state_dict: dict[str, Any],
+    rank: int,
+    alpha: float,
+    process_group=None,
+) -> dict[str, Any]:
+    """
+    Merge LoRA weights into the base model format for efficient inference using distributed operations.
+    This function is designed for distributed training scenarios and uses distributed operations
+    like distributed matrix multiplication.
+
+    NOTE: This function modifies state_dict inplace. If you do not want to do that,
+    make a copy prior to calling this function.
+
+    For every LoRA module in the state dict, this function will convert its
+    base weight then delete the LoRA-specific parameters.
+
+    Args:
+        state_dict (dict[str, Any]): State dict from a model.
+        rank (int): The rank of LoRA matrices.
+        alpha (float): The alpha value used for scaling LoRA decompositions.
+        process_group: The process group to use for distributed operations. Default: None (use default process group)
+
+    Returns:
+        dict[str, Any]: The merged state dict.
+    """
+    lora_modules = _get_lora_modules(state_dict)
+    lora_moe_modules = _get_lora_moe_modules(state_dict)
+    for module in lora_modules.union(lora_moe_modules):
+        # TODO: we don't currently support DoRA for MoE layers
+        if "experts" in module:
+            for param in ["gate", "up", "down"]:
+                lora_a_weight = state_dict[f"{module}.lora_{param}_a"]
+                lora_b_weight = state_dict[f"{module}.lora_{param}_b"]
+
+                # Use distributed operations for matrix multiplication
+                transposed_b = lora_b_weight.transpose(1, 2)
+                transposed_a = lora_a_weight.transpose(1, 2)
+
+                # Perform distributed matrix multiplication
+                if dist.is_initialized():
+                    # Synchronize before operation
+                    dist.barrier(group=process_group)
+
+                    # Distributed matrix multiplication
+                    result = (alpha / rank) * torch.matmul(transposed_b, transposed_a)
+
+                    # Ensure all processes have the same result
+                    dist.all_reduce(result, op=dist.ReduceOp.AVG, group=process_group)
+                else:
+                    # Fallback to regular matmul if distributed is not initialized
+                    result = (alpha / rank) * transposed_b @ transposed_a
+
+                # Apply the result using out-of-place addition
+                proj_weight = state_dict[f"{module}.{param}_proj"]
+                state_dict[f"{module}.{param}_proj"] = proj_weight + result.transpose(
+                    1, 2
+                )
+
+                del state_dict[f"{module}.lora_{param}_a"]
+                del state_dict[f"{module}.lora_{param}_b"]
+            continue
+
+        lora_a_weight = state_dict[f"{module}.lora_a.weight"]
+        lora_b_weight = state_dict[f"{module}.lora_b.weight"]
+        lora_magnitude = state_dict.get(f"{module}.magnitude", None)
+
+        # If magnitude is present, calculate merged DoRA weight
+        if lora_magnitude is not None:
+            base_weight = state_dict[f"{module}.weight"].to(lora_a_weight.dtype)
+
+            # Use distributed operations for matrix multiplication
+            if dist.is_initialized():
+                # Synchronize before operation
+                dist.barrier(group=process_group)
+
+                # Distributed matrix multiplication
+                lora_weight = (alpha / rank) * torch.matmul(
+                    lora_b_weight, lora_a_weight
+                )
+
+                # Ensure all processes have the same result
+                dist.all_reduce(lora_weight, op=dist.ReduceOp.AVG, group=process_group)
+            else:
+                # Fallback to regular matmul if distributed is not initialized
+                lora_weight = (alpha / rank) * lora_b_weight @ lora_a_weight
+
+            merged_weight = base_weight + lora_weight
+
+            # Use distributed operations for norm calculation
+            if dist.is_initialized():
+                weight_norm = torch.linalg.norm(merged_weight, dim=1)
+                dist.all_reduce(weight_norm, op=dist.ReduceOp.AVG, group=process_group)
+            else:
+                weight_norm = torch.linalg.norm(merged_weight, dim=1)
+
+            mag_norm_scale = (lora_magnitude / weight_norm).view(-1, 1)
+            merged_weight *= mag_norm_scale
+            state_dict[f"{module}.weight"] = merged_weight
+            del state_dict[f"{module}.magnitude"]
+
+        # Otherwise it is just vanilla LoRA
+        else:
+            # Use distributed operations for matrix multiplication
+            if dist.is_initialized():
+                # Synchronize before operation
+                dist.barrier(group=process_group)
+
+                # Distributed matrix multiplication
+                lora_weight = (alpha / rank) * torch.matmul(
+                    lora_b_weight, lora_a_weight
+                )
+
+                # Ensure all processes have the same result
+                dist.all_reduce(lora_weight, op=dist.ReduceOp.AVG, group=process_group)
+            else:
+                # Fallback to regular matmul if distributed is not initialized
+                lora_weight = (alpha / rank) * lora_b_weight @ lora_a_weight
+
+            # Use out-of-place addition to support NF4Tensor
+            state_dict[f"{module}.weight"] = (
+                state_dict[f"{module}.weight"] + lora_weight
             )
 
         del state_dict[f"{module}.lora_a.weight"]
