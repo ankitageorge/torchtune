@@ -250,7 +250,13 @@ def get_merged_lora_ckpt(
             state_dict[f"{module}.weight"] += (
                 (alpha / rank) * lora_b_weight @ lora_a_weight
             )
-            print("in place add done")
+            from torchao.dtypes.nf4tensor import NF4Tensor
+
+            print(
+                module,
+                isinstance(state_dict[f"{module}.weight"], NF4Tensor),
+                "in place add done",
+            )
 
         del state_dict[f"{module}.lora_a.weight"]
         del state_dict[f"{module}.lora_b.weight"]
@@ -268,11 +274,11 @@ def get_merged_lora_dist_ckpt(
     """
     Merge LoRA weights into the base model format for efficient inference using distributed operations.
     This function is designed for distributed training scenarios and uses distributed operations
-    like distributed matrix multiplication. It supports FSDP (Fully Sharded Data Parallel) when
-    fsdp_enabled is set to True.
+    like distributed matrix multiplication.
 
     NOTE: This function modifies state_dict inplace. If you do not want to do that,
     make a copy prior to calling this function.
+    NOTE: This does not work for NF4Tensors as they don't support the add and mul operations used here.
 
     For every LoRA module in the state dict, this function will convert its
     base weight then delete the LoRA-specific parameters.
@@ -290,6 +296,11 @@ def get_merged_lora_dist_ckpt(
     lora_modules = _get_lora_modules(state_dict)
     lora_moe_modules = _get_lora_moe_modules(state_dict)
 
+    # Create a simple module for matrix multiplication
+    class MatMulModule(torch.nn.Module):
+        def forward(self, x, y):
+            return (alpha / rank) * torch.matmul(x, y)
+
     for module in sorted(lora_modules.union(lora_moe_modules)):
         # TODO: we don't currently support DoRA for MoE layers
         if "experts" in module:
@@ -297,18 +308,26 @@ def get_merged_lora_dist_ckpt(
                 lora_a_weight = state_dict[f"{module}.lora_{param}_a"]
                 lora_b_weight = state_dict[f"{module}.lora_{param}_b"]
 
-                # Use distributed operations for matrix multiplication
-                transposed_b = lora_b_weight.transpose(1, 2)
-                transposed_a = lora_a_weight.transpose(1, 2)
+                # Create a simple module for transpose operation
+                class TransposeModule(torch.nn.Module):
+                    def __init__(self, dim0, dim1):
+                        super().__init__()
+                        self.dim0 = dim0
+                        self.dim1 = dim1
 
+                    def forward(self, x):
+                        return torch.transpose(x, self.dim0, self.dim1)
+
+                # Parallelize transpose operations
+                transpose_module = TransposeModule(1, 2)
                 dist.barrier()
 
-                # Create a simple module for matrix multiplication
-                class MatMulModule(torch.nn.Module):
-                    def forward(self, x, y):
-                        return (alpha / rank) * torch.matmul(x, y)
+                # Apply distributed transpose
+                transposed_b = transpose_module(lora_b_weight)
+                transposed_a = transpose_module(lora_a_weight)
 
                 mm_module = MatMulModule()
+                dist.barrier()
                 # Parallelize the module across the device mesh
                 parallel_mm = parallelize_module(
                     mm_module, device_mesh, {"x": 0, "y": 1}
@@ -317,9 +336,11 @@ def get_merged_lora_dist_ckpt(
 
                 # Apply the result using out-of-place addition
                 proj_weight = state_dict[f"{module}.{param}_proj"]
-                state_dict[f"{module}.{param}_proj"] = proj_weight + result.transpose(
-                    1, 2
-                )
+
+                dist.barrier()
+                transposed_result = transpose_module(result)
+
+                state_dict[f"{module}.{param}_proj"] = proj_weight + transposed_result
 
                 del state_dict[f"{module}.lora_{param}_a"]
                 del state_dict[f"{module}.lora_{param}_b"]
@@ -332,11 +353,6 @@ def get_merged_lora_dist_ckpt(
         # If magnitude is present, calculate merged DoRA weight
         if lora_magnitude is not None:
             base_weight = state_dict[f"{module}.weight"].to(lora_a_weight.dtype)
-
-            # Create a simple module for matrix multiplication
-            class MatMulModule(torch.nn.Module):
-                def forward(self, x, y):
-                    return (alpha / rank) * torch.matmul(x, y)
 
             mm_module = MatMulModule()
             dist.barrier()
@@ -364,19 +380,14 @@ def get_merged_lora_dist_ckpt(
 
         # Otherwise it is just vanilla LoRA
         else:
-            # Create a simple module for matrix multiplication
-            class MatMulModule(torch.nn.Module):
-                def forward(self, x, y):
-                    return (alpha / rank) * torch.matmul(x, y)
-
             mm_module = MatMulModule()
             dist.barrier()
-            # Parallelize the module across the device mesh
-            parallel_mm = parallelize_module(mm_module, device_mesh, {"x": 0, "y": 1})
-            lora_weight = parallel_mm(lora_b_weight, lora_a_weight)
+            lora_weight = mm_module(
+                lora_b_weight,
+                lora_a_weight,
+            )
 
             state_dict[f"{module}.weight"] += lora_weight
-            print("in place add done")
 
         del state_dict[f"{module}.lora_a.weight"]
         del state_dict[f"{module}.lora_b.weight"]

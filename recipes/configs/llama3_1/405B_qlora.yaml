@@ -40,7 +40,7 @@ checkpointer:
   model_type: LLAMA3
 resume_from_checkpoint: False
 save_adapter_weights_only: False # Set to false to save the whole model + adapter merged
-enable_async_checkpointing: False
+enable_async_checkpointing: True
 
 # Dataset and Sampler
 dataset:
